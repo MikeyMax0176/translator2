@@ -3,20 +3,24 @@ import streamlit as st
 import fitz  # PyMuPDF
 from docx import Document
 
-# Set CPU threading environment variables early to improve inference throughput on CPU
-# You can tune these values for your machine. Setting them before heavy libs load helps BLAS/MKL.
-os.environ.setdefault("OMP_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", "4"))
-os.environ.setdefault("MKL_NUM_THREADS", os.environ.get("MKL_NUM_THREADS", "4"))
-os.environ.setdefault("OPENBLAS_NUM_THREADS", os.environ.get("OPENBLAS_NUM_THREADS", "4"))
-os.environ.setdefault("NUMEXPR_NUM_THREADS", os.environ.get("NUMEXPR_NUM_THREADS", "4"))
+# CPU/thread configuration: prefer using most available cores by default but
+# allow overrides via environment variables before starting Streamlit.
+cpu_count = os.cpu_count() or 1
+default_threads = max(1, cpu_count - 1)
+os.environ.setdefault("OMP_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", str(default_threads)))
+os.environ.setdefault("MKL_NUM_THREADS", os.environ.get("MKL_NUM_THREADS", str(default_threads)))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", os.environ.get("OPENBLAS_NUM_THREADS", str(default_threads)))
+os.environ.setdefault("NUMEXPR_NUM_THREADS", os.environ.get("NUMEXPR_NUM_THREADS", str(default_threads)))
 
 import torch
-# Limit PyTorch threads to avoid oversubscription. Tune as needed (1..cpu_count)
 try:
-    num_threads = int(os.environ.get("OMP_NUM_THREADS", "4"))
-    torch.set_num_threads(num_threads)
+    torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", str(default_threads))))
 except Exception:
     pass
+
+# Defaults for translation batching and generation length; adjustable via env vars
+DEFAULT_BATCH_SIZE = int(os.environ.get("TRANSLATE_BATCH_SIZE", "8"))
+DEFAULT_MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", "512"))
 
 from transformers import MarianMTModel, MarianTokenizer
 
@@ -28,7 +32,7 @@ def load_model():
     name = "Helsinki-NLP/opus-mt-es-en"
     model = MarianMTModel.from_pretrained(name)
     tok = MarianTokenizer.from_pretrained(name)
-    # switch to eval() for inference speed
+    # Use eval mode for inference speed
     model.eval()
     return model, tok
 
@@ -50,21 +54,22 @@ def chunkify(text: str, max_chars: int = 900):
     if cur: chunks.append(cur)
     return chunks
 
-def translate_chunks(chunks, model, tok, progress=None, batch_size=4, max_new_tokens=512):
-    """Translate a list of text chunks in batches to improve throughput on CPU.
-
-    - batch_size: number of chunks to process at once (tune by memory/CPU)
-    - max_new_tokens: limit generated tokens to reduce latency
+def translate_chunks(chunks, model, tok, progress=None, batch_size=None, max_new_tokens=None):
+    """Translate a list of chunks in batches. Batch size and max_new_tokens
+    can be provided or will fallback to environment-configurable defaults.
     """
+    if batch_size is None:
+        batch_size = DEFAULT_BATCH_SIZE
+    if max_new_tokens is None:
+        max_new_tokens = DEFAULT_MAX_NEW_TOKENS
+
     out = []
     total = len(chunks) or 1
     for start in range(0, total, batch_size):
         batch_chunks = chunks[start:start + batch_size]
-        # Tokenize the batch and run generation in inference mode
         with torch.inference_mode():
             inputs = tok(batch_chunks, return_tensors="pt", padding=True, truncation=True)
             gen = model.generate(**inputs, max_new_tokens=max_new_tokens)
-        # gen returns a tensor per batch entry
         for g in gen:
             out.append(tok.decode(g, skip_special_tokens=True))
         if progress:
@@ -140,16 +145,7 @@ if uploaded:
         text = extract_text(raw)
         st.info("Translating…")
         bar = st.progress(0.0)
-        # Allow runtime tuning via environment variables
-        try:
-            batch_size = int(os.environ.get("BATCH_SIZE", "4"))
-        except Exception:
-            batch_size = 4
-        try:
-            max_new_tokens = int(os.environ.get("MAX_NEW_TOKENS", "512"))
-        except Exception:
-            max_new_tokens = 512
-        translated = translate_chunks(chunkify(text), model, tok, progress=bar, batch_size=batch_size, max_new_tokens=max_new_tokens)
+        translated = translate_chunks(chunkify(text), model, tok, progress=bar)
         st.success("Done!")
 
         if "TXT" in fmt:
