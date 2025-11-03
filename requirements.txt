@@ -1,0 +1,8 @@
+streamlit
+transformers
+torch==2.4.0+cpu
+--find-links https://download.pytorch.org/whl/cpu
+PyMuPDF
+pdfplumber
+sentencepiece
+python-docx
