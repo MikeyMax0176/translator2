@@ -1,3 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+
+# Streamlit runtime/logs
+streamlit.log
+streamlit.pid
+
+# Editor directories
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+thumbs.db
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
