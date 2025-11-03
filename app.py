@@ -1,7 +1,23 @@
-import io, re
+import io, re, os
 import streamlit as st
 import fitz  # PyMuPDF
 from docx import Document
+
+# Set CPU threading environment variables early to improve inference throughput on CPU
+# You can tune these values for your machine. Setting them before heavy libs load helps BLAS/MKL.
+os.environ.setdefault("OMP_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", "4"))
+os.environ.setdefault("MKL_NUM_THREADS", os.environ.get("MKL_NUM_THREADS", "4"))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", os.environ.get("OPENBLAS_NUM_THREADS", "4"))
+os.environ.setdefault("NUMEXPR_NUM_THREADS", os.environ.get("NUMEXPR_NUM_THREADS", "4"))
+
+import torch
+# Limit PyTorch threads to avoid oversubscription. Tune as needed (1..cpu_count)
+try:
+    num_threads = int(os.environ.get("OMP_NUM_THREADS", "4"))
+    torch.set_num_threads(num_threads)
+except Exception:
+    pass
+
 from transformers import MarianMTModel, MarianTokenizer
 
 st.set_page_config(page_title="Spanish → English PDF Translator", layout="wide")
@@ -12,6 +28,8 @@ def load_model():
     name = "Helsinki-NLP/opus-mt-es-en"
     model = MarianMTModel.from_pretrained(name)
     tok = MarianTokenizer.from_pretrained(name)
+    # switch to eval() for inference speed
+    model.eval()
     return model, tok
 
 def extract_text(pdf_bytes: bytes) -> str:
@@ -32,13 +50,25 @@ def chunkify(text: str, max_chars: int = 900):
     if cur: chunks.append(cur)
     return chunks
 
-def translate_chunks(chunks, model, tok, progress=None):
-    out, total = [], len(chunks) or 1
-    for i, ch in enumerate(chunks, 1):
-        batch = tok([ch], return_tensors="pt", padding=True, truncation=True)
-        gen = model.generate(**batch, max_new_tokens=1024)
-        out.append(tok.decode(gen[0], skip_special_tokens=True))
-        if progress: progress.progress(i/total)
+def translate_chunks(chunks, model, tok, progress=None, batch_size=4, max_new_tokens=512):
+    """Translate a list of text chunks in batches to improve throughput on CPU.
+
+    - batch_size: number of chunks to process at once (tune by memory/CPU)
+    - max_new_tokens: limit generated tokens to reduce latency
+    """
+    out = []
+    total = len(chunks) or 1
+    for start in range(0, total, batch_size):
+        batch_chunks = chunks[start:start + batch_size]
+        # Tokenize the batch and run generation in inference mode
+        with torch.inference_mode():
+            inputs = tok(batch_chunks, return_tensors="pt", padding=True, truncation=True)
+            gen = model.generate(**inputs, max_new_tokens=max_new_tokens)
+        # gen returns a tensor per batch entry
+        for g in gen:
+            out.append(tok.decode(g, skip_special_tokens=True))
+        if progress:
+            progress.progress(min(1.0, (start + len(batch_chunks)) / total))
     return "\n\n".join(out)
 
 # ---- Exports ----
@@ -123,6 +153,8 @@ if uploaded:
             st.download_button("⬇️ PDF (reflowed)", to_pdf_reflow(translated),
                                "translation.pdf", mime="application/pdf")
         if "HTML" in fmt:
-            html = f"""<!doctype html><meta charset="utf-8"><style>body{{font-family:system-ui,Arial;margin:2rem;line-height:1.5;}}</style>{''.join(f'<p>{p}</p>' for p in translated.split('\\n\\n'))}"""
+            # Build paragraphs separately to avoid f-string expression with backslashes
+            paragraphs = ''.join(f'<p>{p}</p>' for p in translated.split("\n\n"))
+            html = f'<!doctype html><meta charset="utf-8"><style>body{{font-family:system-ui,Arial;margin:2rem;line-height:1.5;}}</style>{paragraphs}'
             st.download_button("⬇️ HTML", html.encode("utf-8"), "translation.html", mime="text/html")
         st.text_area("Preview (first 8k chars)", translated[:8000], height=300)
