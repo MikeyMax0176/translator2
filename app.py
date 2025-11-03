@@ -140,7 +140,16 @@ if uploaded:
         text = extract_text(raw)
         st.info("Translating…")
         bar = st.progress(0.0)
-        translated = translate_chunks(chunkify(text), model, tok, progress=bar)
+        # Allow runtime tuning via environment variables
+        try:
+            batch_size = int(os.environ.get("BATCH_SIZE", "4"))
+        except Exception:
+            batch_size = 4
+        try:
+            max_new_tokens = int(os.environ.get("MAX_NEW_TOKENS", "512"))
+        except Exception:
+            max_new_tokens = 512
+        translated = translate_chunks(chunkify(text), model, tok, progress=bar, batch_size=batch_size, max_new_tokens=max_new_tokens)
         st.success("Done!")
 
         if "TXT" in fmt:
