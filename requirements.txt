@@ -1,7 +1,8 @@
+
+--extra-index-url https://download.pytorch.org/whl/cpu
 streamlit
 transformers
-torch==2.4.0+cpu
---find-links https://download.pytorch.org/whl/cpu
+torch==2.9.0+cpu
 PyMuPDF
 pdfplumber
 sentencepiece
